@@ -52,56 +52,58 @@ def generate_port():
 
 def generate_ipv6(prefix):
     try:
-        network = IPv6Network(prefix)
+        network = IPv6Network(prefix, strict=False)
         random_addr = IPv6Address(network.network_address + random.randint(0, network.num_addresses - 1))
         return str(random_addr)
-    except ValueError:
+    except ValueError as e:
+        print(f"[!] Invalid IPv6 prefix: {e}")
         return None
 
-def add_ipv6(ipv6, interface="ens3"):
+def add_ipv6(ipv6, interface="eth0"):
     system = platform.system()
     if system == "Linux":
         try:
             subprocess.run(["ip", "-6", "addr", "add", f"{ipv6}/128", "dev", interface], check=True)
             print(f"[+] Added IPv6: {ipv6}")
             return True
-        except subprocess.CalledProcessError:
-            print(f"[!] Failed to add IPv6: {ipv6}")
+        except subprocess.CalledProcessError as e:
+            print(f"[!] Failed to add IPv6 {ipv6}: {e}")
             return False
     elif system == "Windows":
         try:
-            subprocess.run(["netsh", "interface", "ipv6", "add", "address", "interface=Ethernet", f"address={ipv6}"], check=True)
+            subprocess.run(["netsh", "interface", "ipv6", "add", "address", f"interface={interface}", f"address={ipv6}"], check=True)
             print(f"[+] Added IPv6: {ipv6}")
             return True
-        except subprocess.CalledProcessError:
-            print(f"[!] Failed to add IPv6: {ipv6}")
+        except subprocess.CalledProcessError as e:
+            print(f"[!] Failed to add IPv6 {ipv6}: {e}")
             return False
     return False
 
-def remove_ipv6(ipv6, interface="ens3"):
+def remove_ipv6(ipv6, interface="eth0"):
     system = platform.system()
     if system == "Linux":
         try:
             subprocess.run(["ip", "-6", "addr", "del", f"{ipv6}/128", "dev", interface], check=True)
             print(f"[-] Removed IPv6: {ipv6}")
             return True
-        except subprocess.CalledProcessError:
-            print(f"[!] Failed to remove IPv6: {ipv6}")
+        except subprocess.CalledProcessError as e:
+            print(f"[!] Failed to remove IPv6 {ipv6}: {e}")
             return False
     elif system == "Windows":
         try:
-            subprocess.run(["netsh", "interface", "ipv6", "delete", "address", "interface=Ethernet", f"address={ipv6}"], check=True)
+            subprocess.run(["netsh", "interface", "ipv6", "delete", "address", f"interface={interface}", f"address={ipv6}"], check=True)
             print(f"[-] Removed IPv6: {ipv6}")
             return True
-        except subprocess.CalledProcessError:
-            print(f"[!] Failed to remove IPv6: {ipv6}")
+        except subprocess.CalledProcessError as e:
+            print(f"[!] Failed to remove IPv6 {ipv6}: {e}")
             return False
     return False
 
 def get_public_ipv4():
     try:
         return requests.get("https://api.ipify.org", timeout=5).text
-    except requests.RequestException:
+    except requests.RequestException as e:
+        print(f"[!] Failed to get public IPv4: {e}")
         return "127.0.0.1"  # Fallback
 
 def update_3proxy_config(ipv4, interface):
@@ -118,17 +120,20 @@ def update_3proxy_config(ipv4, interface):
         config += "flush\n"
 
     config_path = "/etc/3proxy/3proxy.cfg" if platform.system() == "Linux" else "3proxy.cfg"
-    with open(config_path, "w") as f:
-        f.write(config)
-
-    # Restart 3proxy
-    system = platform.system()
-    if system == "Linux":
-        subprocess.run(["pkill", "3proxy"])
-        subprocess.run(["3proxy", config_path])
-    elif system == "Windows":
-        subprocess.run(["taskkill", "/IM", "3proxy.exe", "/F"], shell=True)
-        subprocess.run(["3proxy.exe", config_path], shell=True)
+    try:
+        with open(config_path, "w") as f:
+            f.write(config)
+        # Restart 3proxy
+        system = platform.system()
+        if system == "Linux":
+            subprocess.run(["pkill", "3proxy"], check=False)
+            subprocess.run(["3proxy", config_path], check=True)
+        elif system == "Windows":
+            subprocess.run(["taskkill", "/IM", "3proxy.exe", "/F"], shell=True, check=False)
+            subprocess.run(["3proxy.exe", config_path], shell=True, check=True)
+        print("[+] 3proxy configuration updated and restarted")
+    except Exception as e:
+        print(f"[ personally identifiable information removed] Failed to update 3proxy config: {e}")
 
 def check_expired_proxies():
     cursor.execute("SELECT ipv6, last_used_date FROM proxies WHERE status='active'")
@@ -137,11 +142,15 @@ def check_expired_proxies():
     
     for ipv6, last_used in rows:
         if last_used:
-            last_used_date = datetime.datetime.strptime(last_used, "%Y-%m-%d")
-            if (current_date - last_used_date).days >= PROXY_TTL_DAYS:
-                remove_ipv6(ipv6)
-                cursor.execute("UPDATE proxies SET status='expired' WHERE ipv6=?", (ipv6,))
-                conn.commit()
+            try:
+                last_used_date = datetime.datetime.strptime(last_used, "%Y-%m-%d")
+                if (current_date - last_used_date).days >= PROXY_TTL_DAYS:
+                    remove_ipv6(ipv6)
+                    cursor.execute("UPDATE proxies SET status='expired' WHERE ipv6=?", (ipv6,))
+                    conn.commit()
+                    print(f"[+] Expired proxy {ipv6}")
+            except ValueError as e:
+                print(f"[!] Invalid date format for proxy {ipv6}: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != TELEGRAM_USER_ID:
@@ -154,13 +163,13 @@ async def new_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     count = min(int(context.args[0]) if context.args else 1, 2000)
     proxies = []
     prefix = context.bot_data.get("prefix_ipv6")
-    interface = context.bot_data.get("interface", "ens3")
+    interface = context.bot_data.get("interface", "eth0")
     ipv4 = context.bot_data.get("ipv4")
 
     check_expired_proxies()
 
     for _ in range(count):
-        port = generate_port()
+        port \= generate_port()
         password = generate_password()
         ipv6 = generate_ipv6(prefix) if prefix else None
         if not ipv6:
@@ -181,6 +190,7 @@ async def new_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f.write(proxy + "\n")
         await context.bot.send_document(chat_id=update.effective_chat.id, document=open(filename, "rb"))
         os.remove(filename)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ Created {len(proxies)} proxies.")
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Failed to create proxies.")
 
@@ -190,8 +200,8 @@ async def del_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Please provide IPv6 or 'all' to delete.")
         return
-    interface = context.bot_data.get("interface", "ens3")
-    ipv4 = context.bot_data.get("ipv4")
+    interface = context.bot_data.get("interface", "eth0")
+    ipv4 = context.bot_data.get("ipv vagues4")
 
     if context.args[0].lower() == "all":
         cursor.execute("SELECT ipv6 FROM proxies WHERE status IN ('active','waiting')")
@@ -236,11 +246,19 @@ async def list_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main():
     system = platform.system()
     prefix_ipv6 = input("Enter your IPv6 prefix (e.g., 2401:2420:0:101e::/64): ").strip()
-    interface = input("Enter network interface (e.g., ens3 for Linux, Ethernet for Windows): ").strip()
+    if not prefix_ipv6.endswith("/64"):
+        prefix_ipv6 += "/64"
+        print(f"[+] Appended /64 to prefix: {prefix_ipv6}")
+    interface = input("Enter network interface (e.g., eth0 for Linux, Ethernet for Windows): ").strip()
     ipv4 = get_public_ipv4()
     print(f"[+] Public IPv4: {ipv4}")
 
-    application = ApplicationBuilder().token(API_TOKEN).build()
+    try:
+        application = ApplicationBuilder().token(API_TOKEN).build()
+    except Exception as e:
+        print(f"[!] Failed to initialize Telegram bot: {e}")
+        return
+
     application.bot_data["prefix_ipv6"] = prefix_ipv6
     application.bot_data["ipv4"] = ipv4
     application.bot_data["interface"] = interface
@@ -251,10 +269,13 @@ async def main():
     application.add_handler(CommandHandler("list", list_proxy))
 
     # Periodic cleanup of expired proxies
-    async def cleanup_job(context):
-        check_expired_proxies()
-        update_3proxy_config(ipv4, interface)
-    application.job_queue.run_repeating(cleanup_job, interval=86400)  # Run daily
+    if application.job_queue:
+        async def cleanup_job(context):
+            check_expired_proxies()
+            update_3proxy_config(ipv4, interface)
+        application.job_queue.run_repeating(cleanup_job, interval=86400)  # Run daily
+    else:
+        print("[!] JobQueue not available. Periodic cleanup disabled.")
 
     await application.run_polling()
 
