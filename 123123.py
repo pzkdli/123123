@@ -11,14 +11,12 @@ nest_asyncio.apply()
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# ============= CONFIG ==================
 API_TOKEN = "7022711443:AAG2kU-TWDskXqFxCjap1DGw2jjji2HE2Ac"
 TELEGRAM_USER_ID = 7550813603
 PORT_MIN = 1080
 PORT_MAX = 60000
 DEFAULT_USER = "vtoan"
 
-# ============ KHỞI TẠO DB ================
 conn = sqlite3.connect("proxy.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""
@@ -33,8 +31,6 @@ CREATE TABLE IF NOT EXISTS proxies (
 )
 """)
 conn.commit()
-
-# ============ HÀM TIỆN ÍCH ================
 
 def generate_password():
     return ''.join(random.choices(string.ascii_letters + string.digits, k=6))
@@ -61,7 +57,27 @@ def remove_ipv6_linux(ipv6, interface="ens3"):
 def get_public_ipv4():
     return requests.get("https://api.ipify.org").text
 
-# ============ BOT TELEGRAM ================
+def update_3proxy_config():
+    cursor.execute("SELECT ipv6, port, user, pass FROM proxies WHERE status IN ('active','waiting')")
+    rows = cursor.fetchall()
+    config = "nscache 65536\n\n"
+    config += "setgid 65535\nsetuid 65535\n\n"  # run as nobody
+    config += "flush\n"
+
+    for row in rows:
+        ipv6, port, user, password = row
+        config += f"auth strong\n"
+        config += f"users {user}:CL:{password}\n"
+        config += f"allow {user}\n"
+        config += f"proxy -6 -n -a -p{port} -i{get_public_ipv4()} -e{ipv6}\n"
+        config += "flush\n"
+
+    with open("/etc/3proxy/3proxy.cfg", "w") as f:
+        f.write(config)
+
+    # Restart 3proxy
+    os.system("pkill 3proxy")
+    os.system("3proxy /etc/3proxy/3proxy.cfg &")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != TELEGRAM_USER_ID:
@@ -86,6 +102,8 @@ async def new_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         proxies.append(f"{context.bot_data['ipv4']}:{port}:{DEFAULT_USER}:{password}")
 
+    update_3proxy_config()
+
     filename = f"proxy_new_{int(time.time())}.txt"
     with open(filename, "w") as f:
         for proxy in proxies:
@@ -98,27 +116,19 @@ async def del_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != TELEGRAM_USER_ID:
         return
     if not context.args:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Vui lòng nhập IPv6 hoặc 'all' để xoá.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Vui lòng nhập IPv6 để xoá.")
         return
-    if context.args[0] == "all":
-        cursor.execute("SELECT ipv6 FROM proxies WHERE status IN ('active','waiting')")
-        rows = cursor.fetchall()
-        for row in rows:
-            remove_ipv6_linux(row[0], context.bot_data["interface"])
-        cursor.execute("UPDATE proxies SET status='deleted' WHERE status IN ('active','waiting')")
+    ipv6 = context.args[0]
+    cursor.execute("SELECT port FROM proxies WHERE ipv6=?", (ipv6,))
+    result = cursor.fetchone()
+    if result:
+        remove_ipv6_linux(ipv6, context.bot_data["interface"])
+        cursor.execute("UPDATE proxies SET status='deleted' WHERE ipv6=?", (ipv6,))
         conn.commit()
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ Đã xoá tất cả proxy.")
+        update_3proxy_config()
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ Đã xoá proxy {ipv6}.")
     else:
-        ipv6 = context.args[0]
-        cursor.execute("SELECT port FROM proxies WHERE ipv6=?", (ipv6,))
-        result = cursor.fetchone()
-        if result:
-            remove_ipv6_linux(ipv6, context.bot_data["interface"])
-            cursor.execute("UPDATE proxies SET status='deleted' WHERE ipv6=?", (ipv6,))
-            conn.commit()
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ Đã xoá proxy {ipv6}.")
-        else:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Proxy không tồn tại.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Proxy không tồn tại.")
 
 async def list_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != TELEGRAM_USER_ID:
@@ -141,8 +151,6 @@ async def list_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         msg = "❌ Không có proxy trên trang này."
     await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
-
-# ============ MAIN ================
 
 async def main():
     prefix_ipv6 = input("Nhập prefix IPv6 của bạn (vd: 2001:ee0:48e5:f850::/64): ").strip()
