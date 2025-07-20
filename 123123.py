@@ -15,8 +15,8 @@ from ipaddress import IPv6Address, IPv6Network
 nest_asyncio.apply()
 
 # Configuration
-API_TOKEN = "7022711443:AAG2kU-TWDskXqFxCjap1DGw2jjji2HE2Ac"  # Replace with your Telegram bot token
-TELEGRAM_USER_ID = 7550813603  # Replace with your Telegram user ID
+API_TOKEN = "7022711443:AAG2kU-TWDskXqFxCjap1DGw2jjji2HE2Ac"  # Thay bằng token bot Telegram của bạn
+TELEGRAM_USER_ID = 7550813603  # Thay bằng ID người dùng Telegram của bạn
 PORT_MIN = 1080
 PORT_MAX = 60000
 DEFAULT_USER = "vtoan"
@@ -26,6 +26,8 @@ DB_NAME = "proxy.db"
 # Database setup
 conn = sqlite3.connect(DB_NAME, check_same_thread=False)
 cursor = conn.cursor()
+
+# Create table if not exists
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS proxies (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,6 +40,13 @@ CREATE TABLE IF NOT EXISTS proxies (
     status TEXT
 )
 """)
+
+# Check and add last_used_date column if missing
+cursor.execute("PRAGMA table_info(proxies)")
+columns = [info[1] for info in cursor.fetchall()]
+if "last_used_date" not in columns:
+    cursor.execute("ALTER TABLE proxies ADD COLUMN last_used_date TEXT")
+    print("[+] Added missing last_used_date column to proxies table")
 conn.commit()
 
 def generate_password():
@@ -155,108 +164,137 @@ def check_expired_proxies():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != TELEGRAM_USER_ID:
         return
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ Proxy Manager Bot is running.")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ Proxy Manager Bot đang hoạt động.")
 
 async def new_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != TELEGRAM_USER_ID:
         return
-    count = min(int(context.args[0]) if context.args else 1, 2000)
+    try:
+        count = min(int(context.args[0]) if context.args else 1, 2000)
+    except ValueError:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Số lượng proxy phải là số nguyên.")
+        return
     proxies = []
     prefix = context.bot_data.get("prefix_ipv6")
     interface = context.bot_data.get("interface", "eth0")
     ipv4 = context.bot_data.get("ipv4")
 
-    check_expired_proxies()
+    try:
+        check_expired_proxies()
+    except Exception as e:
+        print(f"[!] Lỗi khi kiểm tra proxy hết hạn: {e}")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Lỗi khi kiểm tra proxy hết hạn.")
 
     for _ in range(count):
         port = generate_port()
         password = generate_password()
         ipv6 = generate_ipv6(prefix) if prefix else None
         if not ipv6:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Invalid IPv6 prefix.")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Prefix IPv6 không hợp lệ.")
             return
         if add_ipv6(ipv6, interface):
             now = datetime.datetime.now().strftime("%Y-%m-%d")
-            cursor.execute("INSERT OR IGNORE INTO proxies (ipv6, port, user, pass, created_date, status) VALUES (?, ?, ?, ?, ?, ?)",
-                          (ipv6, port, DEFAULT_USER, password, now, "waiting"))
-            conn.commit()
-            proxies.append(f"{ipv4}:{port}:{DEFAULT_USER}:{password}")
+            try:
+                cursor.execute("INSERT OR IGNORE INTO proxies (ipv6, port, user, pass, created_date, status) VALUES (?, ?, ?, ?, ?, ?)",
+                              (ipv6, port, DEFAULT_USER, password, now, "waiting"))
+                conn.commit()
+                proxies.append(f"{ipv4}:{port}:{DEFAULT_USER}:{password}")
+            except sqlite3.Error as e:
+                print(f"[!] Lỗi khi chèn proxy vào cơ sở dữ liệu: {e}")
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Lỗi khi tạo proxy {ipv6}: {e}")
+                continue
 
     if proxies:
-        update_3proxy_config(ipv4, interface)
-        filename = f"proxy_new_{int(time.time())}.txt"
-        with open(filename, "w") as f:
-            for proxy in proxies:
-                f.write(proxy + "\n")
-        await context.bot.send_document(chat_id=update.effective_chat.id, document=open(filename, "rb"))
-        os.remove(filename)
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ Created {len(proxies)} proxies.")
+        try:
+            update_3proxy_config(ipv4, interface)
+            filename = f"proxy_new_{int(time.time())}.txt"
+            with open(filename, "w") as f:
+                for proxy in proxies:
+                    f.write(proxy + "\n")
+            await context.bot.send_document(chat_id=update.effective_chat.id, document=open(filename, "rb"))
+            os.remove(filename)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ Đã tạo {len(proxies)} proxy.")
+        except Exception as e:
+            print(f"[!] Lỗi khi cập nhật 3proxy hoặc gửi file: {e}")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Lỗi khi tạo file proxy hoặc cập nhật 3proxy.")
     else:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Failed to create proxies.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Không tạo được proxy nào.")
 
 async def del_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != TELEGRAM_USER_ID:
         return
     if not context.args:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Please provide IPv6 or 'all' to delete.")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Vui lòng cung cấp IPv6 hoặc 'all' để xóa.")
         return
     interface = context.bot_data.get("interface", "eth0")
     ipv4 = context.bot_data.get("ipv4")
 
-    if context.args[0].lower() == "all":
-        cursor.execute("SELECT ipv6 FROM proxies WHERE status IN ('active','waiting')")
-        for (ipv6,) in cursor.fetchall():
-            remove_ipv6(ipv6, interface)
-        cursor.execute("UPDATE proxies SET status='deleted' WHERE status IN ('active','waiting')")
-        conn.commit()
-        update_3proxy_config(ipv4, interface)
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ All proxies deleted.")
-    else:
-        ipv6 = context.args[0]
-        cursor.execute("SELECT port FROM proxies WHERE ipv6=? AND status IN ('active','waiting')", (ipv6,))
-        if cursor.fetchone():
-            remove_ipv6(ipv6, interface)
-            cursor.execute("UPDATE proxies SET status='deleted' WHERE ipv6=?", (ipv6,))
+    try:
+        if context.args[0].lower() == "all":
+            cursor.execute("SELECT ipv6 FROM proxies WHERE status IN ('active','waiting')")
+            for (ipv6,) in cursor.fetchall():
+                remove_ipv6(ipv6, interface)
+            cursor.execute("UPDATE proxies SET status='deleted' WHERE status IN ('active','waiting')")
             conn.commit()
             update_3proxy_config(ipv4, interface)
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ Deleted proxy {ipv6}.")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ Đã xóa tất cả proxy.")
         else:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Proxy not found.")
+            ipv6 = context.args[0]
+            cursor.execute("SELECT port FROM proxies WHERE ipv6=? AND status IN ('active','waiting')", (ipv6,))
+            if cursor.fetchone():
+                remove_ipv6(ipv6, interface)
+                cursor.execute("UPDATE proxies SET status='deleted' WHERE ipv6=?", (ipv6,))
+                conn.commit()
+                update_3proxy_config(ipv4, interface)
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ Đã xóa proxy {ipv6}.")
+            else:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Proxy không tồn tại.")
+    except Exception as e:
+        print(f"[!] Lỗi khi xóa proxy: {e}")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Lỗi khi xóa proxy: {e}")
 
 async def list_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != TELEGRAM_USER_ID:
         return
-    page = max(1, int(context.args[0]) if context.args else 1)
+    try:
+        page = max(1, int(context.args[0]) if context.args else 1)
+    except ValueError:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Số trang phải là số nguyên.")
+        return
     limit = 50
     offset = (page - 1) * limit
-    cursor.execute("SELECT ipv6, port, user, pass, status FROM proxies WHERE status IN ('active','waiting') LIMIT ? OFFSET ?", (limit, offset))
-    rows = cursor.fetchall()
-    ipv4 = context.bot_data.get("ipv4")
-    
-    if rows:
-        msg = f"✅ Proxy page {page}:\n"
-        for row in rows:
-            ipv6, port, user, pass_, status = row
-            msg += f"{ipv4}:{port}:{user}:{pass_} ({status})\n"
-        msg += f"\nUse /list {{page_number}} to view other pages."
-    else:
-        msg = "❌ No proxies found on this page."
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
+    try:
+        cursor.execute("SELECT ipv6, port, user, pass, status FROM proxies WHERE status IN ('active','waiting') LIMIT ? OFFSET ?", (limit, offset))
+        rows = cursor.fetchall()
+        ipv4 = context.bot_data.get("ipv4")
+        
+        if rows:
+            msg = f"✅ Danh sách proxy trang {page}:\n"
+            for row in rows:
+                ipv6, port, user, pass_, status = row
+                msg += f"{ipv4}:{port}:{user}:{pass_} ({status})\n"
+            msg += f"\nSử dụng /list {{số_trang}} để xem trang khác."
+        else:
+            msg = "❌ Không có proxy nào trên trang này."
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
+    except Exception as e:
+        print(f"[!] Lỗi khi liệt kê proxy: {e}")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Lỗi khi liệt kê proxy.")
 
 async def main():
     system = platform.system()
-    prefix_ipv6 = input("Enter your IPv6 prefix (e.g., 2401:2420:0:101e::/64): ").strip()
+    prefix_ipv6 = input("Nhập prefix IPv6 của bạn (ví dụ: 2401:2420:0:101e::/64): ").strip()
     if not prefix_ipv6.endswith("/64"):
         prefix_ipv6 += "/64"
-        print(f"[+] Appended /64 to prefix: {prefix_ipv6}")
-    interface = input("Enter network interface (e.g., eth0 for Linux, Ethernet for Windows): ").strip()
+        print(f"[+] Đã thêm /64 vào prefix: {prefix_ipv6}")
+    interface = input("Nhập giao diện mạng (ví dụ: eth0 cho Linux, Ethernet cho Windows): ").strip()
     ipv4 = get_public_ipv4()
     print(f"[+] Public IPv4: {ipv4}")
 
     try:
         application = ApplicationBuilder().token(API_TOKEN).build()
     except Exception as e:
-        print(f"[!] Failed to initialize Telegram bot: {e}")
+        print(f"[!] Không thể khởi tạo bot Telegram: {e}")
         return
 
     application.bot_data["prefix_ipv6"] = prefix_ipv6
@@ -271,12 +309,15 @@ async def main():
     # Periodic cleanup of expired proxies
     if application.job_queue:
         async def cleanup_job(context):
-            check_expired_proxies()
-            update_3proxy_config(ipv4, interface)
-        application.job_queue.run_repeating(cleanup_job, interval=86400)  # Run daily
-        print("[+] Periodic cleanup job scheduled.")
+            try:
+                check_expired_proxies()
+                update_3proxy_config(ipv4, interface)
+            except Exception as e:
+                print(f"[!] Lỗi trong công việc dọn dẹp định kỳ: {e}")
+        application.job_queue.run_repeating(cleanup_job, interval=86400)  # Chạy hàng ngày
+        print("[+] Công việc dọn dẹp định kỳ đã được lên lịch.")
     else:
-        print("[!] JobQueue not available. Install 'python-telegram-bot[job-queue]' to enable periodic cleanup. Use /del to manually clean up expired proxies.")
+        print("[!] JobQueue không khả dụng. Cài đặt 'python-telegram-bot[job-queue]' để bật dọn dẹp định kỳ. Sử dụng /del để dọn dẹp thủ công.")
 
     await application.run_polling()
 
@@ -285,4 +326,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except Exception as e:
-        print(f"[!] Fatal error: {e}")
+        print(f"[!] Lỗi nghiêm trọng: {e}")
