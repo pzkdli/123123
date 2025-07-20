@@ -52,9 +52,14 @@ def get_ipv6_prefix(interface="eth0"):
         for line in lines:
             if "inet6" in line and "scope global" in line:
                 addr_part = line.strip().split()[1]
-                prefix = addr_part.split("/")[0].rsplit(":", 4)[0] + "::/64"
-                return prefix
-        print(f"[!] Không tìm thấy prefix IPv6 trên giao diện {interface}")
+                ip, prefix_len = addr_part.split("/")
+                # Lấy 64 bit đầu tiên của địa chỉ IPv6
+                try:
+                    network = IPv6Network(f"{ip}/64", strict=False)
+                    return str(network)
+                except ValueError:
+                    print(f"[!] Địa chỉ IPv6 {ip} không hợp lệ để tạo prefix")
+        print(f"[!] Không tìm thấy địa chỉ IPv6 hợp lệ trên giao diện {interface}")
         return None
     except subprocess.CalledProcessError as e:
         print(f"[!] Lỗi khi lấy prefix IPv6: {e}")
@@ -332,10 +337,16 @@ async def main():
     ensure_config_file()
     prefix_ipv6 = get_ipv6_prefix(DEFAULT_INTERFACE)
     if not prefix_ipv6:
-        prefix_ipv6 = input("Không tìm thấy prefix IPv6 tự động. Nhập thủ công (ví dụ: 2401:2420:0:101e::/64): ").strip()
-        if not prefix_ipv6.endswith("/64"):
-            prefix_ipv6 += "/64"
-            print(f"[+] Đã thêm /64 vào prefix: {prefix_ipv6}")
+        while True:
+            prefix_ipv6 = input("Không tìm thấy prefix IPv6 tự động. Nhập thủ công (ví dụ: 2401:2420:0:101e::/64): ").strip()
+            try:
+                IPv6Network(prefix_ipv6, strict=False)
+                if not prefix_ipv6.endswith("/64"):
+                    prefix_ipv6 += "/64"
+                    print(f"[+] Đã thêm /64 vào prefix: {prefix_ipv6}")
+                break
+            except ValueError as e:
+                print(f"[!] Prefix IPv6 không hợp lệ: {e}")
     else:
         print(f"[+] Đã tìm thấy prefix IPv6: {prefix_ipv6}")
     
