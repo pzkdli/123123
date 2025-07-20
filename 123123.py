@@ -17,12 +17,13 @@ nest_asyncio.apply()
 # Configuration
 API_TOKEN = "7022711443:AAG2kU-TWDskXqFxCjap1DGw2jjji2HE2Ac"  # Thay bằng token bot Telegram của bạn
 TELEGRAM_USER_ID = 7550813603  # Thay bằng ID người dùng Telegram của bạn
-PORT_MIN = 10000
+PORT_MIN = 20000
 PORT_MAX = 60000
 DEFAULT_USER = "vtoan"
 PROXY_TTL_DAYS = 30
 DB_NAME = "proxy.db"
 DEFAULT_INTERFACE = "eth0"
+CONFIG_PATH = "/etc/3proxy/3proxy.cfg"
 
 # Database setup
 conn = sqlite3.connect(DB_NAME, check_same_thread=False)
@@ -79,6 +80,17 @@ def check_ipv6_exists(ipv6, interface="eth0"):
         print(f"[!] Lỗi khi kiểm tra IPv6 {ipv6}: {e}")
         return False
 
+def ensure_config_file():
+    """Đảm bảo CONFIG_PATH là file, không phải thư mục"""
+    if os.path.isdir(CONFIG_PATH):
+        print(f"[!] {CONFIG_PATH} là thư mục, đang xóa...")
+        subprocess.run(["rm", "-rf", CONFIG_PATH], check=True)
+    if not os.path.exists(CONFIG_PATH):
+        print(f"[+] Tạo file cấu hình {CONFIG_PATH}")
+        subprocess.run(["touch", CONFIG_PATH], check=True)
+        subprocess.run(["chmod", "644", CONFIG_PATH], check=True)
+        subprocess.run(["chown", "nobody:nogroup", CONFIG_PATH], check=True)
+
 def generate_password():
     return ''.join(random.choices(string.ascii_letters + string.digits, k=6))
 
@@ -114,14 +126,6 @@ def add_ipv6(ipv6, interface="eth0"):
         except subprocess.CalledProcessError as e:
             print(f"[!] Lỗi khi thêm IPv6 {ipv6}: {e}")
             return False
-    elif system == "Windows":
-        try:
-            subprocess.run(["netsh", "interface", "ipv6", "add", "address", f"interface={interface}", f"address={ipv6}"], check=True)
-            print(f"[+] Đã thêm IPv6: {ipv6}")
-            return True
-        except subprocess.CalledProcessError as e:
-            print(f"[!] Lỗi khi thêm IPv6 {ipv6}: {e}")
-            return False
     return False
 
 def remove_ipv6(ipv6, interface="eth0"):
@@ -129,14 +133,6 @@ def remove_ipv6(ipv6, interface="eth0"):
     if system == "Linux":
         try:
             subprocess.run(["ip", "-6", "addr", "del", f"{ipv6}/128", "dev", interface], check=True)
-            print(f"[-] Đã xóa IPv6: {ipv6}")
-            return True
-        except subprocess.CalledProcessError as e:
-            print(f"[!] Lỗi khi xóa IPv6 {ipv6}: {e}")
-            return False
-    elif system == "Windows":
-        try:
-            subprocess.run(["netsh", "interface", "ipv6", "delete", "address", f"interface={interface}", f"address={ipv6}"], check=True)
             print(f"[-] Đã xóa IPv6: {ipv6}")
             return True
         except subprocess.CalledProcessError as e:
@@ -152,6 +148,7 @@ def get_public_ipv4():
         return "127.0.0.1"  # Fallback
 
 def update_3proxy_config(ipv4, interface):
+    ensure_config_file()
     cursor.execute("SELECT ipv6, port, user, pass FROM proxies WHERE status IN ('active','waiting')")
     rows = cursor.fetchall()
     config = "daemon\nnscache 65536\nnserver 8.8.8.8\nnserver [2001:4860:4860::8888]\nsetgid 65535\nsetuid 65535\nlog /var/log/3proxy.log D\n\n"
@@ -167,15 +164,14 @@ def update_3proxy_config(ipv4, interface):
         else:
             print(f"[!] Bỏ qua proxy với IPv6 {ipv6} vì không tồn tại trên {interface}")
 
-    config_path = "/etc/3proxy/3proxy.cfg"
     try:
-        with open(config_path, "w") as f:
+        with open(CONFIG_PATH, "w") as f:
             f.write(config)
-        subprocess.run(["chown", "nobody:nogroup", config_path], check=True)
-        subprocess.run(["chmod", "644", config_path], check=True)
+        subprocess.run(["chown", "nobody:nogroup", CONFIG_PATH], check=True)
+        subprocess.run(["chmod", "644", CONFIG_PATH], check=True)
         # Restart 3proxy
         subprocess.run(["pkill", "-f", "3proxy"], check=False)
-        result = subprocess.run(["3proxy", config_path], capture_output=True, text=True)
+        result = subprocess.run(["3proxy", CONFIG_PATH], capture_output=True, text=True)
         if result.returncode != 0:
             print(f"[!] Lỗi khi khởi động 3proxy: {result.stderr}")
             raise Exception(f"3proxy failed to start: {result.stderr}")
@@ -333,6 +329,7 @@ async def main():
         print("[!] Script chỉ hỗ trợ Linux (Ubuntu).")
         return
 
+    ensure_config_file()
     prefix_ipv6 = get_ipv6_prefix(DEFAULT_INTERFACE)
     if not prefix_ipv6:
         prefix_ipv6 = input("Không tìm thấy prefix IPv6 tự động. Nhập thủ công (ví dụ: 2401:2420:0:101e::/64): ").strip()
