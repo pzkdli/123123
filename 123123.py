@@ -22,6 +22,7 @@ PORT_MAX = 60000
 DEFAULT_USER = "vtoan"
 PROXY_TTL_DAYS = 30
 DB_NAME = "proxy.db"
+DEFAULT_INTERFACE = "eth0"
 
 # Database setup
 conn = sqlite3.connect(DB_NAME, check_same_thread=False)
@@ -45,9 +46,29 @@ CREATE TABLE IF NOT EXISTS proxies (
 cursor.execute("PRAGMA table_info(proxies)")
 columns = [info[1] for info in cursor.fetchall()]
 if "last_used_date" not in columns:
-    cursor.execute("ALTER TABLE proxies ADD COLUMN last_used_date TEXT")
-    print("[+] Added missing last_used_date column to proxies table")
+    try:
+        cursor.execute("ALTER TABLE proxies ADD COLUMN last_used_date TEXT")
+        print("[+] Đã thêm cột last_used_date vào bảng proxies")
+    except sqlite3.Error as e:
+        print(f"[!] Lỗi khi thêm cột last_used_date: {e}")
 conn.commit()
+
+def get_ipv6_prefix(interface="eth0"):
+    """Lấy prefix IPv6 từ giao diện mạng"""
+    try:
+        result = subprocess.run(["ip", "-6", "addr", "show", interface], capture_output=True, text=True, check=True)
+        lines = result.stdout.splitlines()
+        for line in lines:
+            if "inet6" in line and "scope global" in line:
+                # Lấy địa chỉ IPv6 và prefix
+                addr_part = line.strip().split()[1]
+                prefix = addr_part.split("/")[0].rsplit(":", 4)[0] + "::/64"
+                return prefix
+        print(f"[!] Không tìm thấy prefix IPv6 trên giao diện {interface}")
+        return None
+    except subprocess.CalledProcessError as e:
+        print(f"[!] Lỗi khi lấy prefix IPv6: {e}")
+        return None
 
 def generate_password():
     return ''.join(random.choices(string.ascii_letters + string.digits, k=6))
@@ -65,7 +86,7 @@ def generate_ipv6(prefix):
         random_addr = IPv6Address(network.network_address + random.randint(0, network.num_addresses - 1))
         return str(random_addr)
     except ValueError as e:
-        print(f"[!] Invalid IPv6 prefix: {e}")
+        print(f"[!] Prefix IPv6 không hợp lệ: {e}")
         return None
 
 def add_ipv6(ipv6, interface="eth0"):
@@ -73,18 +94,18 @@ def add_ipv6(ipv6, interface="eth0"):
     if system == "Linux":
         try:
             subprocess.run(["ip", "-6", "addr", "add", f"{ipv6}/128", "dev", interface], check=True)
-            print(f"[+] Added IPv6: {ipv6}")
+            print(f"[+] Đã thêm IPv6: {ipv6}")
             return True
         except subprocess.CalledProcessError as e:
-            print(f"[!] Failed to add IPv6 {ipv6}: {e}")
+            print(f"[!] Lỗi khi thêm IPv6 {ipv6}: {e}")
             return False
     elif system == "Windows":
         try:
             subprocess.run(["netsh", "interface", "ipv6", "add", "address", f"interface={interface}", f"address={ipv6}"], check=True)
-            print(f"[+] Added IPv6: {ipv6}")
+            print(f"[+] Đã thêm IPv6: {ipv6}")
             return True
         except subprocess.CalledProcessError as e:
-            print(f"[!] Failed to add IPv6 {ipv6}: {e}")
+            print(f"[!] Lỗi khi thêm IPv6 {ipv6}: {e}")
             return False
     return False
 
@@ -93,18 +114,18 @@ def remove_ipv6(ipv6, interface="eth0"):
     if system == "Linux":
         try:
             subprocess.run(["ip", "-6", "addr", "del", f"{ipv6}/128", "dev", interface], check=True)
-            print(f"[-] Removed IPv6: {ipv6}")
+            print(f"[-] Đã xóa IPv6: {ipv6}")
             return True
         except subprocess.CalledProcessError as e:
-            print(f"[!] Failed to remove IPv6 {ipv6}: {e}")
+            print(f"[!] Lỗi khi xóa IPv6 {ipv6}: {e}")
             return False
     elif system == "Windows":
         try:
             subprocess.run(["netsh", "interface", "ipv6", "delete", "address", f"interface={interface}", f"address={ipv6}"], check=True)
-            print(f"[-] Removed IPv6: {ipv6}")
+            print(f"[-] Đã xóa IPv6: {ipv6}")
             return True
         except subprocess.CalledProcessError as e:
-            print(f"[!] Failed to remove IPv6 {ipv6}: {e}")
+            print(f"[!] Lỗi khi xóa IPv6 {ipv6}: {e}")
             return False
     return False
 
@@ -112,7 +133,7 @@ def get_public_ipv4():
     try:
         return requests.get("https://api.ipify.org", timeout=5).text
     except requests.RequestException as e:
-        print(f"[!] Failed to get public IPv4: {e}")
+        print(f"[!] Lỗi khi lấy public IPv4: {e}")
         return "127.0.0.1"  # Fallback
 
 def update_3proxy_config(ipv4, interface):
@@ -140,9 +161,9 @@ def update_3proxy_config(ipv4, interface):
         elif system == "Windows":
             subprocess.run(["taskkill", "/IM", "3proxy.exe", "/F"], shell=True, check=False)
             subprocess.run(["3proxy.exe", config_path], shell=True, check=True)
-        print("[+] 3proxy configuration updated and restarted")
+        print("[+] Đã cập nhật và khởi động lại cấu hình 3proxy")
     except Exception as e:
-        print(f"[!] Failed to update 3proxy config: {e}")
+        print(f"[!] Lỗi khi cập nhật cấu hình 3proxy: {e}")
 
 def check_expired_proxies():
     cursor.execute("SELECT ipv6, last_used_date FROM proxies WHERE status='active'")
@@ -157,9 +178,9 @@ def check_expired_proxies():
                     remove_ipv6(ipv6)
                     cursor.execute("UPDATE proxies SET status='expired' WHERE ipv6=?", (ipv6,))
                     conn.commit()
-                    print(f"[+] Expired proxy {ipv6}")
+                    print(f"[+] Đã hết hạn proxy {ipv6}")
             except ValueError as e:
-                print(f"[!] Invalid date format for proxy {ipv6}: {e}")
+                print(f"[!] Lỗi định dạng ngày cho proxy {ipv6}: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != TELEGRAM_USER_ID:
@@ -283,11 +304,16 @@ async def list_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def main():
     system = platform.system()
-    prefix_ipv6 = input("Nhập prefix IPv6 của bạn (ví dụ: 2401:2420:0:101e::/64): ").strip()
-    if not prefix_ipv6.endswith("/64"):
-        prefix_ipv6 += "/64"
-        print(f"[+] Đã thêm /64 vào prefix: {prefix_ipv6}")
-    interface = input("Nhập giao diện mạng (ví dụ: eth0 cho Linux, Ethernet cho Windows): ").strip()
+    prefix_ipv6 = get_ipv6_prefix(DEFAULT_INTERFACE)
+    if not prefix_ipv6:
+        prefix_ipv6 = input("Không tìm thấy prefix IPv6 tự động. Nhập thủ công (ví dụ: 2401:2420:0:101e::/64): ").strip()
+        if not prefix_ipv6.endswith("/64"):
+            prefix_ipv6 += "/64"
+            print(f"[+] Đã thêm /64 vào prefix: {prefix_ipv6}")
+    else:
+        print(f"[+] Đã tìm thấy prefix IPv6: {prefix_ipv6}")
+    
+    interface = input(f"Nhập giao diện mạng (mặc định: {DEFAULT_INTERFACE}): ").strip() or DEFAULT_INTERFACE
     ipv4 = get_public_ipv4()
     print(f"[+] Public IPv4: {ipv4}")
 
