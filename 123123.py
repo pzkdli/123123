@@ -60,7 +60,6 @@ def get_ipv6_prefix(interface="eth0"):
         lines = result.stdout.splitlines()
         for line in lines:
             if "inet6" in line and "scope global" in line:
-                # Lấy địa chỉ IPv6 và prefix
                 addr_part = line.strip().split()[1]
                 prefix = addr_part.split("/")[0].rsplit(":", 4)[0] + "::/64"
                 return prefix
@@ -69,6 +68,17 @@ def get_ipv6_prefix(interface="eth0"):
     except subprocess.CalledProcessError as e:
         print(f"[!] Lỗi khi lấy prefix IPv6: {e}")
         return None
+
+def check_3proxy_status():
+    """Kiểm tra trạng thái 3proxy"""
+    try:
+        result = subprocess.run(["ps", "aux"], capture_output=True, text=True, check=True)
+        if "3proxy" in result.stdout:
+            return True
+        return False
+    except subprocess.CalledProcessError as e:
+        print(f"[!] Lỗi khi kiểm tra trạng thái 3proxy: {e}")
+        return False
 
 def generate_password():
     return ''.join(random.choices(string.ascii_letters + string.digits, k=6))
@@ -162,6 +172,8 @@ def update_3proxy_config(ipv4, interface):
             subprocess.run(["taskkill", "/IM", "3proxy.exe", "/F"], shell=True, check=False)
             subprocess.run(["3proxy.exe", config_path], shell=True, check=True)
         print("[+] Đã cập nhật và khởi động lại cấu hình 3proxy")
+        if not check_3proxy_status():
+            print("[!] Cảnh báo: 3proxy không chạy sau khi khởi động lại")
     except Exception as e:
         print(f"[!] Lỗi khi cập nhật cấu hình 3proxy: {e}")
 
@@ -235,6 +247,8 @@ async def new_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_document(chat_id=update.effective_chat.id, document=open(filename, "rb"))
             os.remove(filename)
             await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ Đã tạo {len(proxies)} proxy.")
+            if not check_3proxy_status():
+                await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Cảnh báo: 3proxy không chạy. Vui lòng kiểm tra trạng thái dịch vụ.")
         except Exception as e:
             print(f"[!] Lỗi khi cập nhật 3proxy hoặc gửi file: {e}")
             await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Lỗi khi tạo file proxy hoặc cập nhật 3proxy.")
