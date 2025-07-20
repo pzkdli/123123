@@ -17,7 +17,7 @@ nest_asyncio.apply()
 # Configuration
 API_TOKEN = "7022711443:AAG2kU-TWDskXqFxCjap1DGw2jjji2HE2Ac"  # Thay bằng token bot Telegram của bạn
 TELEGRAM_USER_ID = 7550813603  # Thay bằng ID người dùng Telegram của bạn
-PORT_MIN = 1080
+PORT_MIN = 10000
 PORT_MAX = 60000
 DEFAULT_USER = "vtoan"
 PROXY_TTL_DAYS = 30
@@ -41,16 +41,6 @@ CREATE TABLE IF NOT EXISTS proxies (
     status TEXT
 )
 """)
-
-# Check and add last_used_date column if missing
-cursor.execute("PRAGMA table_info(proxies)")
-columns = [info[1] for info in cursor.fetchall()]
-if "last_used_date" not in columns:
-    try:
-        cursor.execute("ALTER TABLE proxies ADD COLUMN last_used_date TEXT")
-        print("[+] Đã thêm cột last_used_date vào bảng proxies")
-    except sqlite3.Error as e:
-        print(f"[!] Lỗi khi thêm cột last_used_date: {e}")
 conn.commit()
 
 def get_ipv6_prefix(interface="eth0"):
@@ -80,6 +70,15 @@ def check_3proxy_status():
         print(f"[!] Lỗi khi kiểm tra trạng thái 3proxy: {e}")
         return False
 
+def check_ipv6_exists(ipv6, interface="eth0"):
+    """Kiểm tra xem địa chỉ IPv6 đã được thêm vào giao diện chưa"""
+    try:
+        result = subprocess.run(["ip", "-6", "addr", "show", interface], capture_output=True, text=True, check=True)
+        return ipv6 in result.stdout
+    except subprocess.CalledProcessError as e:
+        print(f"[!] Lỗi khi kiểm tra IPv6 {ipv6}: {e}")
+        return False
+
 def generate_password():
     return ''.join(random.choices(string.ascii_letters + string.digits, k=6))
 
@@ -88,7 +87,13 @@ def generate_port():
         port = random.randint(PORT_MIN, PORT_MAX)
         cursor.execute("SELECT port FROM proxies WHERE port=? AND status IN ('active','waiting')", (port,))
         if not cursor.fetchone():
-            return port
+            try:
+                result = subprocess.run(["netstat", "-tulnp"], capture_output=True, text=True, check=False)
+                if f":{port}" not in result.stdout:
+                    return port
+            except subprocess.CalledProcessError:
+                return port
+    return port
 
 def generate_ipv6(prefix):
     try:
@@ -149,28 +154,31 @@ def get_public_ipv4():
 def update_3proxy_config(ipv4, interface):
     cursor.execute("SELECT ipv6, port, user, pass FROM proxies WHERE status IN ('active','waiting')")
     rows = cursor.fetchall()
-    config = "nscache 65536\nnserver 8.8.8.8\nnserver [2001:4860:4860::8888]\nsetgid 65535\nsetuid 65535\n\n"
+    config = "daemon\nnscache 65536\nnserver 8.8.8.8\nnserver [2001:4860:4860::8888]\nsetgid 65535\nsetuid 65535\nlog /var/log/3proxy.log D\n\n"
     
     for row in rows:
         ipv6, port, user, password = row
-        config += f"auth strong\n"
-        config += f"users {user}:CL:{password}\n"
-        config += f"allow {user}\n"
-        config += f"proxy -6 -n -a -p{port} -i{ipv4} -e{ipv6}\n"
-        config += "flush\n"
+        if check_ipv6_exists(ipv6, interface):
+            config += f"auth strong\n"
+            config += f"users {user}:CL:{password}\n"
+            config += f"allow {user}\n"
+            config += f"proxy -6 -n -a -p{port} -i{ipv4} -e{ipv6}\n"
+            config += "flush\n"
+        else:
+            print(f"[!] Bỏ qua proxy với IPv6 {ipv6} vì không tồn tại trên {interface}")
 
-    config_path = "/etc/3proxy/3proxy.cfg" if platform.system() == "Linux" else "3proxy.cfg"
+    config_path = "/etc/3proxy/3proxy.cfg"
     try:
         with open(config_path, "w") as f:
             f.write(config)
+        subprocess.run(["chown", "nobody:nogroup", config_path], check=True)
+        subprocess.run(["chmod", "644", config_path], check=True)
         # Restart 3proxy
-        system = platform.system()
-        if system == "Linux":
-            subprocess.run(["pkill", "3proxy"], check=False)
-            subprocess.run(["3proxy", config_path], check=True)
-        elif system == "Windows":
-            subprocess.run(["taskkill", "/IM", "3proxy.exe", "/F"], shell=True, check=False)
-            subprocess.run(["3proxy.exe", config_path], shell=True, check=True)
+        subprocess.run(["pkill", "-f", "3proxy"], check=False)
+        result = subprocess.run(["3proxy", config_path], capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"[!] Lỗi khi khởi động 3proxy: {result.stderr}")
+            raise Exception(f"3proxy failed to start: {result.stderr}")
         print("[+] Đã cập nhật và khởi động lại cấu hình 3proxy")
         if not check_3proxy_status():
             print("[!] Cảnh báo: 3proxy không chạy sau khi khởi động lại")
@@ -225,7 +233,7 @@ async def new_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not ipv6:
             await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Prefix IPv6 không hợp lệ.")
             return
-        if add_ipv6(ipv6, interface):
+        if add_ipv6(ipv6, interface) and check_ipv6_exists(ipv6, interface):
             now = datetime.datetime.now().strftime("%Y-%m-%d")
             try:
                 cursor.execute("INSERT OR IGNORE INTO proxies (ipv6, port, user, pass, created_date, status) VALUES (?, ?, ?, ?, ?, ?)",
@@ -236,6 +244,9 @@ async def new_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 print(f"[!] Lỗi khi chèn proxy vào cơ sở dữ liệu: {e}")
                 await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Lỗi khi tạo proxy {ipv6}: {e}")
                 continue
+        else:
+            print(f"[!] Không thể thêm IPv6 {ipv6} vào {interface}")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Không thể thêm IPv6 {ipv6}")
 
     if proxies:
         try:
@@ -251,7 +262,7 @@ async def new_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ Cảnh báo: 3proxy không chạy. Vui lòng kiểm tra trạng thái dịch vụ.")
         except Exception as e:
             print(f"[!] Lỗi khi cập nhật 3proxy hoặc gửi file: {e}")
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Lỗi khi tạo file proxy hoặc cập nhật 3proxy.")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Lỗi khi tạo file proxy hoặc cập nhật 3proxy: {e}")
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Không tạo được proxy nào.")
 
@@ -318,6 +329,10 @@ async def list_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def main():
     system = platform.system()
+    if system != "Linux":
+        print("[!] Script chỉ hỗ trợ Linux (Ubuntu).")
+        return
+
     prefix_ipv6 = get_ipv6_prefix(DEFAULT_INTERFACE)
     if not prefix_ipv6:
         prefix_ipv6 = input("Không tìm thấy prefix IPv6 tự động. Nhập thủ công (ví dụ: 2401:2420:0:101e::/64): ").strip()
