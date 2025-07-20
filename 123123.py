@@ -133,7 +133,7 @@ def update_3proxy_config(ipv4, interface):
             subprocess.run(["3proxy.exe", config_path], shell=True, check=True)
         print("[+] 3proxy configuration updated and restarted")
     except Exception as e:
-        print(f"[ personally identifiable information removed] Failed to update 3proxy config: {e}")
+        print(f"[!] Failed to update 3proxy config: {e}")
 
 def check_expired_proxies():
     cursor.execute("SELECT ipv6, last_used_date FROM proxies WHERE status='active'")
@@ -169,7 +169,7 @@ async def new_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     check_expired_proxies()
 
     for _ in range(count):
-        port \= generate_port()
+        port = generate_port()
         password = generate_password()
         ipv6 = generate_ipv6(prefix) if prefix else None
         if not ipv6:
@@ -201,7 +201,7 @@ async def del_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Please provide IPv6 or 'all' to delete.")
         return
     interface = context.bot_data.get("interface", "eth0")
-    ipv4 = context.bot_data.get("ipv vagues4")
+    ipv4 = context.bot_data.get("ipv4")
 
     if context.args[0].lower() == "all":
         cursor.execute("SELECT ipv6 FROM proxies WHERE status IN ('active','waiting')")
@@ -274,11 +274,15 @@ async def main():
             check_expired_proxies()
             update_3proxy_config(ipv4, interface)
         application.job_queue.run_repeating(cleanup_job, interval=86400)  # Run daily
+        print("[+] Periodic cleanup job scheduled.")
     else:
-        print("[!] JobQueue not available. Periodic cleanup disabled.")
+        print("[!] JobQueue not available. Install 'python-telegram-bot[job-queue]' to enable periodic cleanup. Use /del to manually clean up expired proxies.")
 
     await application.run_polling()
 
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print(f"[!] Fatal error: {e}")
