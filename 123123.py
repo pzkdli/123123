@@ -48,11 +48,11 @@ def generate_ipv6(prefix):
 
 def add_ipv6_linux(ipv6, interface="ens3"):
     print(f"[+] Adding IPv6: {ipv6}")
-    os.system(f"ip -6 addr add {ipv6}/64 dev {interface}")
+    os.system(f"ip -6 addr add {ipv6}/128 dev {interface}")
 
 def remove_ipv6_linux(ipv6, interface="ens3"):
     print(f"[-] Removing IPv6: {ipv6}")
-    os.system(f"ip -6 addr del {ipv6}/64 dev {interface}")
+    os.system(f"ip -6 addr del {ipv6}/128 dev {interface}")
 
 def get_public_ipv4():
     return requests.get("https://api.ipify.org").text
@@ -60,9 +60,7 @@ def get_public_ipv4():
 def update_3proxy_config():
     cursor.execute("SELECT ipv6, port, user, pass FROM proxies WHERE status IN ('active','waiting')")
     rows = cursor.fetchall()
-    config = "nscache 65536\n\n"
-    config += "setgid 65535\nsetuid 65535\n\n"  # run as nobody
-    config += "flush\n"
+    config = "nscache 65536\nsetgid 65535\nsetuid 65535\n\n"
 
     for row in rows:
         ipv6, port, user, password = row
@@ -153,7 +151,7 @@ async def list_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
 
 async def main():
-    prefix_ipv6 = input("Nhập prefix IPv6 của bạn (vd: 2001:ee0:48e5:f850::/64): ").strip()
+    prefix_ipv6 = input("Nhập prefix IPv6 của bạn (vd: 2401:2420:0:101e::): ").strip()
     interface = input("Nhập tên interface network (vd: ens3, eth0): ").strip()
     ipv4 = get_public_ipv4()
     print(f"[+] Public IPv4 của bạn: {ipv4}")
