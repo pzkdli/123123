@@ -1,158 +1,276 @@
-#!/bin/bash
+import os
+import json
+import random
+import string
+import subprocess
+import datetime
+import telebot
+from threading import Lock
 
-# --- Cảnh báo bảo mật ---
-# Mở tất cả các cổng (10000-60000) và tắt SELinux có thể làm giảm đáng kể bảo mật của VPS của bạn.
-# Hãy đảm bảo bạn hiểu rủi ro trước khi chạy tập lệnh này trên môi trường sản xuất.
-# Chạy dịch vụ 3proxy dưới quyền root chỉ là tạm thời để khắc phục lỗi.
-# --- End cảnh báo ---
+# --- ⚙️ CẤU HÌNH HỆ THỐNG ---
+BOT_TOKEN = "7022711443:AAHPixbTjnocW3LWgpW6gsGep-mCScOzJvM"
+ADMIN_ID = 7550813603
+IPV6_SUBNET = "2401:2420:0:102f"
+NETWORK_INTERFACE = "eth0"
+PROXY_USERNAME = "vtoan5516"
+PORT_RANGE_START = 10000
+PORT_RANGE_END = 60000
+PROXY_LIFETIME_DAYS = 30
+REGENERATE_THRESHOLD = 200 # Số proxy hết hạn để kích hoạt tạo mới
 
-echo "--- Bắt đầu quá trình cài đặt và cấu hình ---"
+# --- 📂 ĐƯỜNG DẪN FILE ---
+DATA_DIR = "/opt/proxy_manager"
+PROXY_DATA_FILE = os.path.join(DATA_DIR, "proxy_data.json")
+PROXY_CONFIG_FILE = "/etc/3proxy/3proxy.cfg"
+LOG_FILE = "/var/log/3proxy/3proxy.log"
 
-# Đối với AlmaLinux 9, các kho lưu trữ mặc định nên hoạt động.
-# Dọn dẹp cache DNF để đảm bảo sử dụng các nguồn mới nhất và cập nhật hệ thống.
-echo "Dọn dẹp DNF cache và cập nhật hệ thống (cho AlmaLinux 9.4)..."
-sudo dnf clean all
-sudo dnf update -y
-sudo dnf upgrade -y
+# Khởi tạo bot và Lock để tránh xung đột dữ liệu
+bot = telebot.TeleBot(BOT_TOKEN)
+data_lock = Lock()
 
-# 2. Cài đặt các gói cần thiết (Python 3.6+, pip, git, curl, net-tools, wget, make, gcc)
-echo "2. Cài đặt Python 3.6+, pip và các gói cần thiết cho biên dịch..."
-sudo dnf install -y python3 python3-pip git curl net-tools wget systemd make gcc
-# 'make' và 'gcc' được cài đặt trực tiếp, thay thế cho 'Development Tools' groupinstall phức tạp hơn.
+# --- 🕵️ HÀM KIỂM TRA ADMIN ---
+def is_admin(message):
+    return message.from_user.id == ADMIN_ID
 
-# 3. Cài đặt thư viện Python cho bot Telegram
-echo "3. Cài đặt thư viện Python Telegram Bot..."
-# Đảm bảo pip3 hoạt động sau khi cài đặt gói python3-pip
-sudo pip3 install python-telegram-bot==13.7 apscheduler==3.9.1
+# --- 📦 HÀM QUẢN LÝ DỮ LIỆU PROXY (JSON) ---
+def load_proxy_data():
+    with data_lock:
+        if not os.path.exists(PROXY_DATA_FILE):
+            return {"proxies": [], "used_ports": []}
+        try:
+            with open(PROXY_DATA_FILE, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            return {"proxies": [], "used_ports": []}
 
-# 4. Tải xuống và biên dịch 3proxy
-echo "4. Tải xuống và biên dịch 3proxy..."
-THREEPROXY_VERSION="0.9.5" # Phiên bản cụ thể theo yêu cầu của bạn
-THREEPROXY_DIR="/usr/local/3proxy"
-mkdir -p "$THREEPROXY_DIR"
-cd "$THREEPROXY_DIR"
+def save_proxy_data(data):
+    with data_lock:
+        with open(PROXY_DATA_FILE, 'w') as f:
+            json.dump(data, f, indent=4)
 
-# Sử dụng URL trực tiếp từ GitHub releases cho bản 0.9.5.tar.gz
-# Đây là URL chính xác để tải về file nén, không phải trang HTML
-THREEPROXY_TAR_URL="https://github.com/3proxy/3proxy/archive/refs/tags/${THREEPROXY_VERSION}.tar.gz"
+# --- 🌍 HÀM MẠNG & HỆ THỐNG ---
+def get_public_ipv4():
+    try:
+        # Lấy IP public của VPS
+        result = subprocess.run(['curl', '-s', 'ifconfig.me'], capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except Exception as e:
+        print(f"Lỗi khi lấy IPv4 public: {e}")
+        return "127.0.0.1" # IP dự phòng nếu lỗi
 
-# Xóa file tar.gz cũ nếu có để đảm bảo tải bản mới
-rm -f "3proxy-${THREEPROXY_VERSION}.tar.gz"
+PUBLIC_IPV4 = get_public_ipv4()
 
-echo "Đang tải 3proxy từ $THREEPROXY_TAR_URL..."
-wget "$THREEPROXY_TAR_URL" -O "3proxy-${THREEPROXY_VERSION}.tar.gz"
-if [ $? -ne 0 ]; then
-    echo "Lỗi: Không thể tải file 3proxy-${THREEPROXY_VERSION}.tar.gz. Kiểm tra kết nối hoặc URL."
-    exit 1
-fi
+def generate_random_ipv6():
+    # Tạo ngẫu nhiên 4 khối cuối của địa chỉ IPv6
+    return f"{IPV6_SUBNET}:{random.randint(0, 0xffff):04x}:{random.randint(0, 0xffff):04x}:{random.randint(0, 0xffff):04x}:{random.randint(0, 0xffff):04x}"
 
-echo "Đang giải nén 3proxy..."
-tar -xzf "3proxy-${THREEPROXY_VERSION}.tar.gz"
-if [ $? -ne 0 ]; then
-    echo "Lỗi: Không thể giải nén file 3proxy-${THREEPROXY_VERSION}.tar.gz. Vui lòng kiểm tra file."
-    exit 1
-fi
+def generate_random_password(length=2):
+    # Tạo mật khẩu ngẫu nhiên 2 chữ cái thường
+    return ''.join(random.choice(string.ascii_lowercase) for _ in range(length))
 
-# Thư mục giải nén sẽ là 3proxy-0.9.5
-EXTRACTED_DIR="3proxy-${THREEPROXY_VERSION}"
-if [ ! -d "$EXTRACTED_DIR" ]; then
-    echo "Lỗi: Thư mục giải nén $EXTRACTED_DIR không tồn tại."
-    exit 1
-fi
-cd "$EXTRACTED_DIR"
+def update_system_ips(proxies_to_add, proxies_to_remove):
+    print(f"Adding {len(proxies_to_add)} IPs, Removing {len(proxies_to_remove)} IPs.")
+    # Chạy lệnh hệ thống để xóa IP cũ
+    for proxy in proxies_to_remove:
+        subprocess.run(['ip', '-6', 'addr', 'del', f"{proxy['ipv6']}/128", 'dev', NETWORK_INTERFACE], capture_output=True)
+    
+    # Chạy lệnh hệ thống để thêm IP mới
+    for proxy in proxies_to_add:
+        subprocess.run(['ip', '-6', 'addr', 'add', f"{proxy['ipv6']}/128", 'dev', NETWORK_INTERFACE], capture_output=True)
 
-echo "Đang biên dịch 3proxy..."
-make -f Makefile.Linux
-if [ $? -ne 0 ]; then
-    echo "Lỗi: Không thể biên dịch 3proxy. Vui lòng kiểm tra các thư viện cần thiết và lỗi trên."
-    exit 1
-fi
+def generate_3proxy_config_and_reload():
+    data = load_proxy_data()
+    # Các dòng cấu hình cơ bản cho 3proxy
+    config_lines = [
+        "nserver 8.8.8.8",
+        "nserver 8.8.4.4",
+        "nscache 65536",
+        "timeouts 1 5 30 60 180 1800 15 60",
+        "daemon",
+        f"log {LOG_FILE}",
+        "logformat \"-L%t.%.%N -p%p -u%U -c%C -r%R -e%E\"", # Format log để parse
+        "auth strong",
+    ]
+    
+    # Lọc ra các proxy chưa hết hạn để đưa vào config
+    active_proxies = [p for p in data['proxies'] if p['status'] != 'expired']
 
-echo "Đang cài đặt 3proxy..."
-# Di chuyển các file thực thi vào thư mục cài đặt
-sudo cp src/3proxy src/dameon src/ftppr src/pop3p src/socks src/tcppm src/udppm src/webcache "$THREEPROXY_DIR/"
-sudo chmod +x "$THREEPROXY_DIR/3proxy"
+    for proxy in active_proxies:
+        config_lines.append(f"users {proxy['username']}:CL:{proxy['password']}")
+        config_lines.append(f"allow {proxy['username']}")
+        # Dòng quan trọng: ánh xạ port và IP vào/ra
+        config_lines.append(f"proxy -6 -s0 -n -a -p{proxy['port']} -i{PUBLIC_IPV4} -e{proxy['ipv6']}")
 
-echo "3proxy đã được biên dịch và cài đặt vào $THREEPROXY_DIR/"
+    with open(PROXY_CONFIG_FILE, 'w') as f:
+        f.write("\n".join(config_lines))
+        
+    print("Reloading 3proxy service...")
+    # Giết tiến trình cũ và khởi động lại với config mới
+    subprocess.run(['killall', '3proxy'], capture_output=True)
+    subprocess.run(['/usr/local/bin/3proxy', PROXY_CONFIG_FILE], check=True)
+    print("3proxy reloaded.")
 
-# 5. Cấu hình cơ bản cho 3proxy và tạo thư mục log
-echo "5. Cấu hình cơ bản cho 3proxy và tạo thư mục log..."
-sudo mkdir -p /etc/3proxy # Đảm bảo thư mục /etc/3proxy tồn tại
-sudo mkdir -p /var/log/3proxy
-sudo touch /var/log/3proxy/access.log
-sudo chmod 666 /var/log/3proxy/access.log # Để 3proxy có thể ghi log
+# --- ✨ HÀM LOGIC CHÍNH ---
+def create_new_proxies(quantity: int):
+    data = load_proxy_data()
+    newly_created_proxies = []
+    
+    for _ in range(quantity):
+        # Tìm một port chưa được sử dụng
+        while True:
+            port = random.randint(PORT_RANGE_START, PORT_RANGE_END)
+            if port not in data['used_ports']:
+                data['used_ports'].append(port)
+                break
+        
+        proxy_info = {
+            "ipv4": PUBLIC_IPV4,
+            "port": port,
+            "ipv6": generate_random_ipv6(),
+            "username": PROXY_USERNAME,
+            "password": generate_random_password(),
+            "status": "unused", # Trạng thái ban đầu: chưa dùng
+            "creation_time": datetime.datetime.now().isoformat(),
+            "first_used_time": None
+        }
+        data['proxies'].append(proxy_info)
+        newly_created_proxies.append(proxy_info)
 
-# Tạo file cấu hình 3proxy ban đầu
-# Bot sẽ tự động cập nhật file này
-sudo bash -c "cat > /etc/3proxy/3proxy.cfg <<EOL
-# Cấu hình 3proxy mặc định, được quản lý bởi bot proxy.py
+    save_proxy_data(data)
+    
+    # Cập nhật hệ thống (thêm IP, reload 3proxy)
+    update_system_ips(newly_created_proxies, [])
+    generate_3proxy_config_and_reload()
+    
+    return newly_created_proxies
 
-# Máy chủ DNS (Cloudflare, Google) - ưu tiên IPv6
-nserver [2606:4700:4700::1111]
-nserver [2606:4700:4700::1001]
-nserver [2001:4860:4860::8888]
-nserver [2001:4860:4860::8844]
+def check_proxies_and_regenerate():
+    print(f"Running hourly check at {datetime.datetime.now()}...")
+    data = load_proxy_data()
+    
+    # 1. Đọc log để phát hiện "lần dùng đầu tiên"
+    try:
+        with open(LOG_FILE, 'r') as f:
+            logs = f.readlines()
+        
+        # Tạo một map để tra cứu nhanh các proxy chưa active
+        unused_proxies_map = {str(p['port']): p for p in data['proxies'] if p['status'] == 'unused'}
+        if unused_proxies_map:
+            for log_line in logs:
+                # Parse log để tìm port được sử dụng
+                port_used = None
+                if "-p" in log_line:
+                    try:
+                        port_used = log_line.split("-p")[1].split(" ")[0]
+                    except IndexError:
+                        continue
+                
+                if port_used and port_used in unused_proxies_map:
+                    print(f"Proxy on port {port_used} detected first use. Updating status.")
+                    unused_proxies_map[port_used]['status'] = 'active'
+                    unused_proxies_map[port_used]['first_used_time'] = datetime.datetime.now().isoformat()
+    except FileNotFoundError:
+        print("Log file not found, skipping first-use detection.")
+        
+    # 2. Kiểm tra và đánh dấu các proxy đã hết hạn 30 ngày
+    now = datetime.datetime.now()
+    proxies_to_remove_from_iface = []
 
-# Thời gian chờ mặc định (giây)
-timeout 1200
+    for proxy in data['proxies']:
+        if proxy['status'] == 'active' and proxy['first_used_time']:
+            first_used_time = datetime.datetime.fromisoformat(proxy['first_used_time'])
+            if now > first_used_time + datetime.timedelta(days=PROXY_LIFETIME_DAYS):
+                if proxy['status'] != 'expired':
+                    print(f"Proxy on port {proxy['port']} has expired.")
+                    proxy['status'] = 'expired'
+                    proxies_to_remove_from_iface.append(proxy)
 
-# Cấu hình ghi nhật ký
-log /var/log/3proxy/access.log D
-logformat \"- +_L%t.%. %N.%p %E %U %C:%c %R:%r %O %I %h %T\"
-rotate 30
+    # Nếu có proxy mới hết hạn, xóa IP của nó khỏi card mạng
+    if proxies_to_remove_from_iface:
+        update_system_ips([], proxies_to_remove_from_iface)
 
-# Các proxy được thêm vào bên dưới bởi bot:
-EOL"
+    # 3. Tự động tái tạo nếu số proxy hết hạn đạt ngưỡng
+    expired_proxies = [p for p in data['proxies'] if p['status'] == 'expired']
+    if len(expired_proxies) >= REGENERATE_THRESHOLD:
+        print(f"Expired proxy count ({len(expired_proxies)}) reached threshold ({REGENERATE_THRESHOLD}). Regenerating...")
+        
+        # Dọn dẹp: Xóa hẳn các proxy hết hạn khỏi CSDL
+        data['proxies'] = [p for p in data['proxies'] if p['status'] != 'expired']
+        expired_ports = {p['port'] for p in expired_proxies}
+        data['used_ports'] = [p for p in data['used_ports'] if p not in expired_ports]
+        
+        save_proxy_data(data)
+        
+        # Tạo 2000 proxy mới
+        new_proxies = create_new_proxies(2000)
+        
+        # Gửi thông báo và file cho admin
+        bot.send_message(ADMIN_ID, f"♻️ Hệ thống đã tự động tái tạo 2000 proxy mới do có {len(expired_proxies)} proxy hết hạn.")
+        send_proxy_list_to_admin(ADMIN_ID, new_proxies, "new_proxy_list.txt")
 
-# 6. Tạo dịch vụ Systemd cho 3proxy
-echo "6. Tạo dịch vụ Systemd cho 3proxy..."
-sudo bash -c "cat > /etc/systemd/system/3proxy.service <<EOL
-[Unit]
-Description=3proxy Proxy Server
-After=network.target
+    save_proxy_data(data)
+    # Xoá trắng file log sau mỗi lần kiểm tra để tránh file quá lớn
+    open(LOG_FILE, 'w').close()
+    
+    print("Hourly check finished.")
 
-[Service]
-Type=forking
-ExecStart=${THREEPROXY_DIR}/3proxy /etc/3proxy/3proxy.cfg
-ExecReload=/bin/kill -HUP \$MAINPID
-PIDFile=/var/run/3proxy.pid
-User=root # Tạm thời chạy 3proxy với quyền root để kiểm tra
-Group=root # Tạm thời chạy 3proxy với quyền root để kiểm tra
-LimitNOFILE=512000
+def send_proxy_list_to_admin(chat_id, proxies, filename):
+    if not proxies:
+        bot.send_message(chat_id, "Không có proxy nào để hiển thị.")
+        return
+        
+    list_content = "\n".join([f"{p['ipv4']}:{p['port']}:{p['username']}:{p['password']}" for p in proxies])
+    
+    with open(filename, "w") as f:
+        f.write(list_content)
+    
+    with open(filename, "rb") as f:
+        bot.send_document(chat_id, f)
+    
+    os.remove(filename)
 
-[Install]
-WantedBy=multi-user.target
-EOL"
+# --- 🤖 TELEGRAM BOT HANDLERS ---
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    if not is_admin(message): return
+    help_text = (
+        "Chào Admin! Tôi là bot quản lý Proxy IPv6.\n\n"
+        "Các lệnh có sẵn:\n"
+        "🔹 `/tao <số lượng>` - Tạo số lượng proxy mới.\n"
+        "   *Ví dụ:* `/tao 2000`\n"
+        "🔹 `/dashboard` - Hiển thị bảng điều khiển trạng thái.\n"
+        "🔹 `/ds_proxy` - Gửi file danh sách tất cả proxy đang hoạt động.\n"
+        "🔹 `/check` - Chạy kiểm tra và tái tạo thủ công."
+    )
+    bot.reply_to(message, help_text)
 
-sudo systemctl daemon-reload
-sudo systemctl enable 3proxy.service
-sudo systemctl start 3proxy.service
-if [ $? -ne 0 ]; then
-    echo "Lỗi: Không thể khởi động dịch vụ 3proxy. Kiểm tra nhật ký hệ thống bằng 'sudo journalctl -xeu 3proxy.service'."
-    exit 1
-fi
-echo "Dịch vụ 3proxy đã được tạo và khởi động."
+@bot.message_handler(commands=['tao'])
+def handle_create_proxy(message):
+    if not is_admin(message): return
+    try:
+        quantity = int(message.text.split()[1])
+        if not 1 <= quantity <= 10000: raise ValueError("Số lượng không hợp lệ.")
+            
+        bot.reply_to(message, f"🚀 Bắt đầu tạo {quantity} proxy... Vui lòng chờ trong giây lát.")
+        new_proxies = create_new_proxies(quantity)
+        bot.send_message(message.chat.id, f"✅ Đã tạo thành công {quantity} proxy.")
+        send_proxy_list_to_admin(message.chat.id, new_proxies, f"proxies_{quantity}.txt")
+        
+    except (IndexError, ValueError):
+        bot.reply_to(message, "Lỗi cú pháp. Vui lòng sử dụng: `/tao <số lượng>`")
 
-# 7. Cấu hình Firewall (Mở tất cả các cổng 10000-60000)
-echo "7. Cấu hình Firewall (Mở các cổng 10000-60000) và tắt SELinux..."
-# Dành cho AlmaLinux 9 (Firewalld)
-if command -v firewall-cmd &>/dev/null; then
-    sudo systemctl enable firewalld --now
-    sudo firewall-cmd --zone=public --add-port=10000-60000/tcp --permanent
-    sudo firewall-cmd --reload
-    echo "Firewalld đã được cấu hình."
-elif command -v iptables &>/dev/null; then
-    # Dành cho các hệ thống cũ hơn dùng iptables
-    sudo iptables -A INPUT -p tcp --dport 10000:60000 -j ACCEPT
-    sudo service iptables save
-    echo "Iptables đã được cấu hình."
-fi
-
-# 8. Tắt SELinux (thường gây ra lỗi với các dịch vụ proxy)
-sudo setenforce 0
-sudo sed -i 's/SELINUX=enforcing/SELINUX=permissive/g' /etc/selinux/config
-echo "SELinux đã được chuyển sang chế độ Permissive (có hiệu lực sau khi khởi động lại)."
-
-echo "--- Quá trình cài đặt và cấu hình hoàn tất ---"
-echo "Bạn có thể cần khởi động lại VPS để các thay đổi của SELinux có hiệu lực đầy đủ."
-echo "Bây giờ bạn có thể chạy file proxy.py."
+@bot.message_handler(commands=['dashboard'])
+def handle_dashboard(message):
+    if not is_admin(message): return
+    data = load_proxy_data()
+    proxies = data.get('proxies', [])
+    total = len(proxies)
+    unused = len([p for p in proxies if p['status'] == 'unused'])
+    active = len([p for p in proxies if p['status'] == 'active'])
+    expired = len([p for p in proxies if p['status'] == 'expired'])
+    
+    last_check_time = datetime.datetime.now().strftime("%d/%m/%Y - %H:%M")
+    
+    dashboard_text = (
+        f"📊 **Tình trạng Proxy hiện tại:**\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
