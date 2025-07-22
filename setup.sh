@@ -24,24 +24,43 @@ else
 fi
 sudo yum install -y curl git net-tools wget systemd
 
+# Cài đặt các công cụ phát triển để biên dịch phần mềm (bao gồm 'make')
+echo "Cài đặt các công cụ phát triển (Development Tools)..."
+sudo yum groupinstall "Development Tools" -y
+
 # 3. Cài đặt thư viện Python cho bot Telegram
 echo "3. Cài đặt thư viện Python Telegram Bot..."
-sudo pip3 install python-telegram-bot==13.7 apscheduler==3.9.1 sqlite3
+# Sử dụng pip3 vì python3-pip đã được cài đặt
+sudo pip3 install python-telegram-bot==13.7 apscheduler==3.9.1
 
 # 4. Tải xuống và biên dịch 3proxy
 echo "4. Tải xuống và biên dịch 3proxy..."
 # 3proxy thường không có sẵn trong các kho mặc định, nên ta sẽ biên dịch từ mã nguồn
-THREEPROXY_VERSION="0.9.4" # Bạn có thể thay đổi phiên bản này
+THREEPROXY_VERSION="0.9.5" # Đã cập nhật lên phiên bản 0.9.5
 THREEPROXY_DIR="/usr/local/3proxy"
 mkdir -p "$THREEPROXY_DIR"
 cd "$THREEPROXY_DIR"
 
+# Sử dụng URL chính xác từ GitHub releases (refs/tags/)
+THREEPROXY_TAR_URL="https://github.com/3proxy/3proxy/archive/refs/tags/${THREEPROXY_VERSION}.tar.gz"
+
 if [ ! -f "3proxy-${THREEPROXY_VERSION}.tar.gz" ]; then
-    wget "https://github.com/z3APA3A/3proxy/archive/3proxy-${THREEPROXY_VERSION}.tar.gz" -O "3proxy-${THREEPROXY_VERSION}.tar.gz"
+    wget "$THREEPROXY_TAR_URL" -O "3proxy-${THREEPROXY_VERSION}.tar.gz"
 fi
 
 tar -xzf "3proxy-${THREEPROXY_VERSION}.tar.gz"
-cd "3proxy-${THREEPROXY_VERSION}"
+if [ $? -ne 0 ]; then
+    echo "Lỗi: Không thể giải nén file 3proxy.tar.gz. Vui lòng kiểm tra file."
+    exit 1
+fi
+
+# Tìm tên thư mục đã giải nén (thường là 3proxy-0.9.5 hoặc 3proxy-VERSION)
+EXTRACTED_DIR=$(tar -tzf "3proxy-${THREEPROXY_VERSION}.tar.gz" | head -1 | cut -f1 -d"/")
+if [ -z "$EXTRACTED_DIR" ]; then
+    echo "Lỗi: Không thể xác định tên thư mục giải nén của 3proxy."
+    exit 1
+fi
+cd "$EXTRACTED_DIR"
 
 # Biên dịch 3proxy
 make -f Makefile.Linux
@@ -64,7 +83,7 @@ sudo chmod 666 /var/log/3proxy/access.log # Để 3proxy có thể ghi log
 
 # Tạo file cấu hình 3proxy ban đầu
 # Bot sẽ tự động cập nhật file này
-sudo bash -c "cat > ${THREEPROXY_CONFIG_PATH:-/etc/3proxy/3proxy.cfg} <<EOL
+sudo bash -c "cat > /etc/3proxy/3proxy.cfg <<EOL
 # Cấu hình 3proxy mặc định, được quản lý bởi bot proxy.py
 
 # Máy chủ DNS (Cloudflare, Google) - ưu tiên IPv6
@@ -78,12 +97,10 @@ timeout 1200
 
 # Cấu hình ghi nhật ký
 log /var/log/3proxy/access.log D
-logformat "- +_L%t.%. %N.%p %E %U %C:%c %R:%r %O %I %h %T"
+logformat \"- +_L%t.%. %N.%p %E %U %C:%c %R:%r %O %I %h %T\"
 rotate 30
 
-# Mặc định không có proxy nào được cấu hình ở đây, tất cả sẽ được thêm bởi bot
-# Proxy được thêm dạng: proxy -6 -n -a -p<port> -i<vps_ipv4> -e<ipv6>
-# users <user>:CL:<password>
+# Các proxy được thêm vào bên dưới bởi bot:
 EOL"
 
 # 6. Tạo dịch vụ Systemd cho 3proxy
@@ -95,7 +112,7 @@ After=network.target
 
 [Service]
 Type=forking
-ExecStart=${THREEPROXY_DIR}/3proxy ${THREEPROXY_CONFIG_PATH:-/etc/3proxy/3proxy.cfg}
+ExecStart=${THREEPROXY_DIR}/3proxy /etc/3proxy/3proxy.cfg
 ExecReload=/bin/kill -HUP \$MAINPID
 PIDFile=/var/run/3proxy.pid
 User=nobody # Chạy 3proxy với quyền user thấp hơn
@@ -110,14 +127,14 @@ sudo systemctl daemon-reload
 sudo systemctl enable 3proxy.service
 sudo systemctl start 3proxy.service
 if [ $? -ne 0 ]; then
-    echo "Lỗi: Không thể khởi động dịch vụ 3proxy. Kiểm tra nhật ký hệ thống."
+    echo "Lỗi: Không thể khởi động dịch vụ 3proxy. Kiểm tra nhật ký hệ thống bằng 'sudo journalctl -xeu 3proxy.service'."
     exit 1
 fi
 echo "Dịch vụ 3proxy đã được tạo và khởi động."
 
 # 7. Cấu hình Firewall (Mở tất cả các cổng 10000-60000)
 echo "7. Cấu hình Firewall (Mở các cổng 10000-60000) và tắt SELinux..."
-# Dành cho CentOS 7 (Firewalld)
+# Dành cho CentOS 7/8 (Firewalld)
 if command -v firewall-cmd &>/dev/null; then
     sudo systemctl enable firewalld --now
     sudo firewall-cmd --zone=public --add-port=10000-60000/tcp --permanent
