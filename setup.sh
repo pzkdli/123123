@@ -7,90 +7,55 @@
 
 echo "--- Bắt đầu quá trình cài đặt và cấu hình ---"
 
-# Khắc phục lỗi kho lưu trữ CentOS 8 (nếu áp dụng)
-if grep -q "release=8" /etc/yum.repos.d/CentOS-Linux-BaseOS.repo 2>/dev/null; then
-    echo "Phát hiện CentOS 8. Đang khắc phục các URL kho lưu trữ..."
-    # Tạm thời vô hiệu hóa mirrorlist và sử dụng baseurl trực tiếp đến vault
-    sudo sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-Linux-*.repo
-    sudo sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-Linux-*.repo
-    # Dọn dẹp cache DNF và tạo lại
-    echo "Dọn dẹp DNF cache và tạo lại..."
-    sudo dnf clean all
-    sudo dnf makecache --refresh
-    if [ $? -ne 0 ]; then
-        echo "Cảnh báo: Lỗi khi dọn dẹp hoặc tạo lại DNF cache. Vẫn tiếp tục."
-    fi
-    echo "Đã thử khắc phục kho lưu trữ CentOS 8."
-fi
+# Đối với AlmaLinux 9, các kho lưu trữ mặc định nên hoạt động.
+# Dọn dẹp cache DNF để đảm bảo sử dụng các nguồn mới nhất và cập nhật hệ thống.
+echo "Dọn dẹp DNF cache và cập nhật hệ thống (cho AlmaLinux 9.4)..."
+sudo dnf clean all
+sudo dnf update -y
+sudo dnf upgrade -y
 
-# 1. Cập nhật hệ thống
-echo "1. Cập nhật hệ thống..."
-sudo yum update -y
-if [ $? -ne 0 ]; then
-    echo "Cảnh báo: Lỗi khi cập nhật hệ thống. Vẫn tiếp tục cài đặt."
-fi
-sudo yum upgrade -y
-if [ $? -ne 0 ]; then
-    echo "Cảnh báo: Lỗi khi nâng cấp hệ thống. Vẫn tiếp tục cài đặt."
-fi
-
-# 2. Cài đặt các gói cần thiết (Python 3.6+, git, curl, net-tools, wget)
-echo "2. Cài đặt Python 3.6+ và các gói cần thiết..."
-if command -v python3 &>/dev/null; then
-    echo "Python 3 đã được cài đặt."
-else
-    echo "Cài đặt Python 3 và pip..."
-    sudo yum install -y python3 python3-pip
-fi
-sudo yum install -y curl git net-tools wget systemd
-
-# Cài đặt các công cụ phát triển để biên dịch phần mềm (bao gồm 'make' và 'gcc')
-echo "Cài đặt các công cụ phát triển (Development Tools), make, và gcc..."
-# Thử cài đặt make và gcc riêng lẻ trước nhóm công cụ
-sudo yum install -y make gcc
-if [ $? -ne 0 ]; then
-    echo "Cảnh báo: Không thể cài đặt make hoặc gcc riêng lẻ. Thử cài đặt nhóm Development Tools."
-fi
-sudo yum groupinstall "Development Tools" -y
-if [ $? -ne 0 ]; then
-    echo "Lỗi: Không thể cài đặt nhóm Development Tools. Vui lòng kiểm tra lại cấu hình kho lưu trữ."
-    exit 1 # Thoát nếu các công cụ phát triển không thể cài đặt
-fi
+# 2. Cài đặt các gói cần thiết (Python 3.6+, pip, git, curl, net-tools, wget, make, gcc)
+echo "2. Cài đặt Python 3.6+, pip và các gói cần thiết cho biên dịch..."
+sudo dnf install -y python3 python3-pip git curl net-tools wget systemd make gcc
+# 'make' và 'gcc' được cài đặt trực tiếp, thay thế cho 'Development Tools' groupinstall phức tạp hơn.
 
 # 3. Cài đặt thư viện Python cho bot Telegram
 echo "3. Cài đặt thư viện Python Telegram Bot..."
+# Đảm bảo pip3 hoạt động sau khi cài đặt gói python3-pip
 sudo pip3 install python-telegram-bot==13.7 apscheduler==3.9.1
 
 # 4. Tải xuống và biên dịch 3proxy
 echo "4. Tải xuống và biên dịch 3proxy..."
+THREEPROXY_VERSION="0.9.5" # Phiên bản cụ thể theo yêu cầu của bạn
 THREEPROXY_DIR="/usr/local/3proxy"
 mkdir -p "$THREEPROXY_DIR"
 cd "$THREEPROXY_DIR"
 
-# Sử dụng URL từ 3proxy.ru, luôn tải bản mới nhất
-THREEPROXY_TAR_URL="https://3proxy.ru/3proxy.tar.gz"
+# Sử dụng URL trực tiếp từ GitHub releases cho bản 0.9.5.tar.gz
+# Đây là URL chính xác để tải về file nén, không phải trang HTML
+THREEPROXY_TAR_URL="https://github.com/3proxy/3proxy/archive/refs/tags/${THREEPROXY_VERSION}.tar.gz"
 
 # Xóa file tar.gz cũ nếu có để đảm bảo tải bản mới
-rm -f 3proxy.tar.gz
+rm -f "3proxy-${THREEPROXY_VERSION}.tar.gz"
 
 echo "Đang tải 3proxy từ $THREEPROXY_TAR_URL..."
-wget "$THREEPROXY_TAR_URL" -O "3proxy.tar.gz"
+wget "$THREEPROXY_TAR_URL" -O "3proxy-${THREEPROXY_VERSION}.tar.gz"
 if [ $? -ne 0 ]; then
-    echo "Lỗi: Không thể tải file 3proxy.tar.gz từ $THREEPROXY_TAR_URL. Kiểm tra kết nối hoặc URL."
+    echo "Lỗi: Không thể tải file 3proxy-${THREEPROXY_VERSION}.tar.gz. Kiểm tra kết nối hoặc URL."
     exit 1
 fi
 
 echo "Đang giải nén 3proxy..."
-tar -xzf "3proxy.tar.gz"
+tar -xzf "3proxy-${THREEPROXY_VERSION}.tar.gz"
 if [ $? -ne 0 ]; then
-    echo "Lỗi: Không thể giải nén file 3proxy.tar.gz. Vui lòng kiểm tra file."
+    echo "Lỗi: Không thể giải nén file 3proxy-${THREEPROXY_VERSION}.tar.gz. Vui lòng kiểm tra file."
     exit 1
 fi
 
-# Tìm tên thư mục đã giải nén (thường là "3proxy-VERSION" hoặc chỉ "3proxy")
-EXTRACTED_DIR=$(ls -d 3proxy* 2>/dev/null | head -1)
-if [ -z "$EXTRACTED_DIR" ] || [ ! -d "$EXTRACTED_DIR" ]; then
-    echo "Lỗi: Không thể xác định thư mục giải nén của 3proxy."
+# Thư mục giải nén sẽ là 3proxy-0.9.5
+EXTRACTED_DIR="3proxy-${THREEPROXY_VERSION}"
+if [ ! -d "$EXTRACTED_DIR" ]; then
+    echo "Lỗi: Thư mục giải nén $EXTRACTED_DIR không tồn tại."
     exit 1
 fi
 cd "$EXTRACTED_DIR"
@@ -98,7 +63,7 @@ cd "$EXTRACTED_DIR"
 echo "Đang biên dịch 3proxy..."
 make -f Makefile.Linux
 if [ $? -ne 0 ]; then
-    echo "Lỗi: Không thể biên dịch 3proxy. Vui lòng kiểm tra các thư viện cần thiết."
+    echo "Lỗi: Không thể biên dịch 3proxy. Vui lòng kiểm tra các thư viện cần thiết và lỗi trên."
     exit 1
 fi
 
@@ -111,6 +76,7 @@ echo "3proxy đã được biên dịch và cài đặt vào $THREEPROXY_DIR/"
 
 # 5. Cấu hình cơ bản cho 3proxy và tạo thư mục log
 echo "5. Cấu hình cơ bản cho 3proxy và tạo thư mục log..."
+sudo mkdir -p /etc/3proxy # Đảm bảo thư mục /etc/3proxy tồn tại
 sudo mkdir -p /var/log/3proxy
 sudo touch /var/log/3proxy/access.log
 sudo chmod 666 /var/log/3proxy/access.log # Để 3proxy có thể ghi log
@@ -168,7 +134,7 @@ echo "Dịch vụ 3proxy đã được tạo và khởi động."
 
 # 7. Cấu hình Firewall (Mở tất cả các cổng 10000-60000)
 echo "7. Cấu hình Firewall (Mở các cổng 10000-60000) và tắt SELinux..."
-# Dành cho CentOS 7/8 (Firewalld)
+# Dành cho AlmaLinux 9 (Firewalld)
 if command -v firewall-cmd &>/dev/null; then
     sudo systemctl enable firewalld --now
     sudo firewall-cmd --zone=public --add-port=10000-60000/tcp --permanent
