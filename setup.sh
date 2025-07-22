@@ -7,6 +7,20 @@
 
 echo "--- Bắt đầu quá trình cài đặt và cấu hình ---"
 
+# Khắc phục lỗi kho lưu trữ CentOS 8 (nếu áp dụng)
+# Lỗi "Couldn't resolve host: mirrorlist.centos.org" là phổ biến trên CentOS 8
+# Cần chuyển sang vault.centos.org
+if grep -q "release=8" /etc/yum.repos.d/CentOS-Linux-BaseOS.repo 2>/dev/null; then
+    echo "Phát hiện CentOS 8. Đang khắc phục các URL kho lưu trữ..."
+    # Tạm thời vô hiệu hóa mirrorlist và sử dụng baseurl trực tiếp đến vault
+    sudo sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-Linux-*.repo
+    sudo sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-Linux-*.repo
+    # Dọn dẹp cache DNF và tạo lại
+    sudo dnf clean all
+    sudo dnf makecache --refresh
+    echo "Đã thử khắc phục kho lưu trữ CentOS 8."
+fi
+
 # 1. Cập nhật hệ thống
 echo "1. Cập nhật hệ thống..."
 sudo yum update -y
@@ -14,8 +28,6 @@ sudo yum upgrade -y
 
 # 2. Cài đặt các gói cần thiết (Python 3.6+, git, curl, net-tools, wget)
 echo "2. Cài đặt Python 3.6+ và các gói cần thiết..."
-# Đối với CentOS 7, Python 3 có thể là python36, python3, hoặc từ EPEL
-# Đối với CentOS 8, python3 là mặc định
 if command -v python3 &>/dev/null; then
     echo "Python 3 đã được cài đặt."
 else
@@ -30,45 +42,51 @@ sudo yum groupinstall "Development Tools" -y
 
 # 3. Cài đặt thư viện Python cho bot Telegram
 echo "3. Cài đặt thư viện Python Telegram Bot..."
-# Sử dụng pip3 vì python3-pip đã được cài đặt
 sudo pip3 install python-telegram-bot==13.7 apscheduler==3.9.1
 
 # 4. Tải xuống và biên dịch 3proxy
 echo "4. Tải xuống và biên dịch 3proxy..."
-# 3proxy thường không có sẵn trong các kho mặc định, nên ta sẽ biên dịch từ mã nguồn
-THREEPROXY_VERSION="0.9.5" # Đã cập nhật lên phiên bản 0.9.5
 THREEPROXY_DIR="/usr/local/3proxy"
 mkdir -p "$THREEPROXY_DIR"
 cd "$THREEPROXY_DIR"
 
-# Sử dụng URL chính xác từ GitHub releases (refs/tags/)
-THREEPROXY_TAR_URL="https://github.com/3proxy/3proxy/archive/refs/tags/${THREEPROXY_VERSION}.tar.gz"
+# Sử dụng URL từ 3proxy.ru, luôn tải bản mới nhất
+THREEPROXY_TAR_URL="https://3proxy.ru/3proxy.tar.gz"
 
-if [ ! -f "3proxy-${THREEPROXY_VERSION}.tar.gz" ]; then
-    wget "$THREEPROXY_TAR_URL" -O "3proxy-${THREEPROXY_VERSION}.tar.gz"
+# Xóa file tar.gz cũ nếu có để đảm bảo tải bản mới
+rm -f 3proxy.tar.gz
+
+echo "Đang tải 3proxy từ $THREEPROXY_TAR_URL..."
+wget "$THREEPROXY_TAR_URL" -O "3proxy.tar.gz"
+if [ $? -ne 0 ]; then
+    echo "Lỗi: Không thể tải file 3proxy.tar.gz từ $THREEPROXY_TAR_URL. Kiểm tra kết nối hoặc URL."
+    exit 1
 fi
 
-tar -xzf "3proxy-${THREEPROXY_VERSION}.tar.gz"
+echo "Đang giải nén 3proxy..."
+tar -xzf "3proxy.tar.gz"
 if [ $? -ne 0 ]; then
     echo "Lỗi: Không thể giải nén file 3proxy.tar.gz. Vui lòng kiểm tra file."
     exit 1
 fi
 
-# Tìm tên thư mục đã giải nén (thường là 3proxy-0.9.5 hoặc 3proxy-VERSION)
-EXTRACTED_DIR=$(tar -tzf "3proxy-${THREEPROXY_VERSION}.tar.gz" | head -1 | cut -f1 -d"/")
-if [ -z "$EXTRACTED_DIR" ]; then
-    echo "Lỗi: Không thể xác định tên thư mục giải nén của 3proxy."
+# Tìm tên thư mục đã giải nén (thường là "3proxy-VERSION" hoặc chỉ "3proxy")
+# Sử dụng ls -d 3proxy* để tìm thư mục bắt đầu bằng "3proxy"
+EXTRACTED_DIR=$(ls -d 3proxy* 2>/dev/null | head -1)
+if [ -z "$EXTRACTED_DIR" ] || [ ! -d "$EXTRACTED_DIR" ]; then
+    echo "Lỗi: Không thể xác định thư mục giải nén của 3proxy."
     exit 1
 fi
 cd "$EXTRACTED_DIR"
 
-# Biên dịch 3proxy
+echo "Đang biên dịch 3proxy..."
 make -f Makefile.Linux
 if [ $? -ne 0 ]; then
-    echo "Lỗi: Không thể biên dịch 3proxy. Kiểm tra lỗi trên."
+    echo "Lỗi: Không thể biên dịch 3proxy. Vui lòng kiểm tra các thư viện cần thiết."
     exit 1
 fi
 
+echo "Đang cài đặt 3proxy..."
 # Di chuyển các file thực thi vào thư mục cài đặt
 sudo cp src/3proxy src/dameon src/ftppr src/pop3p src/socks src/tcppm src/udppm src/webcache "$THREEPROXY_DIR/"
 sudo chmod +x "$THREEPROXY_DIR/3proxy"
