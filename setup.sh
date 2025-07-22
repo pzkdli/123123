@@ -8,23 +8,31 @@
 echo "--- Bắt đầu quá trình cài đặt và cấu hình ---"
 
 # Khắc phục lỗi kho lưu trữ CentOS 8 (nếu áp dụng)
-# Lỗi "Couldn't resolve host: mirrorlist.centos.org" là phổ biến trên CentOS 8
-# Cần chuyển sang vault.centos.org
 if grep -q "release=8" /etc/yum.repos.d/CentOS-Linux-BaseOS.repo 2>/dev/null; then
     echo "Phát hiện CentOS 8. Đang khắc phục các URL kho lưu trữ..."
     # Tạm thời vô hiệu hóa mirrorlist và sử dụng baseurl trực tiếp đến vault
     sudo sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-Linux-*.repo
     sudo sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-Linux-*.repo
     # Dọn dẹp cache DNF và tạo lại
+    echo "Dọn dẹp DNF cache và tạo lại..."
     sudo dnf clean all
     sudo dnf makecache --refresh
+    if [ $? -ne 0 ]; then
+        echo "Cảnh báo: Lỗi khi dọn dẹp hoặc tạo lại DNF cache. Vẫn tiếp tục."
+    fi
     echo "Đã thử khắc phục kho lưu trữ CentOS 8."
 fi
 
 # 1. Cập nhật hệ thống
 echo "1. Cập nhật hệ thống..."
 sudo yum update -y
+if [ $? -ne 0 ]; then
+    echo "Cảnh báo: Lỗi khi cập nhật hệ thống. Vẫn tiếp tục cài đặt."
+fi
 sudo yum upgrade -y
+if [ $? -ne 0 ]; then
+    echo "Cảnh báo: Lỗi khi nâng cấp hệ thống. Vẫn tiếp tục cài đặt."
+fi
 
 # 2. Cài đặt các gói cần thiết (Python 3.6+, git, curl, net-tools, wget)
 echo "2. Cài đặt Python 3.6+ và các gói cần thiết..."
@@ -36,9 +44,18 @@ else
 fi
 sudo yum install -y curl git net-tools wget systemd
 
-# Cài đặt các công cụ phát triển để biên dịch phần mềm (bao gồm 'make')
-echo "Cài đặt các công cụ phát triển (Development Tools)..."
+# Cài đặt các công cụ phát triển để biên dịch phần mềm (bao gồm 'make' và 'gcc')
+echo "Cài đặt các công cụ phát triển (Development Tools), make, và gcc..."
+# Thử cài đặt make và gcc riêng lẻ trước nhóm công cụ
+sudo yum install -y make gcc
+if [ $? -ne 0 ]; then
+    echo "Cảnh báo: Không thể cài đặt make hoặc gcc riêng lẻ. Thử cài đặt nhóm Development Tools."
+fi
 sudo yum groupinstall "Development Tools" -y
+if [ $? -ne 0 ]; then
+    echo "Lỗi: Không thể cài đặt nhóm Development Tools. Vui lòng kiểm tra lại cấu hình kho lưu trữ."
+    exit 1 # Thoát nếu các công cụ phát triển không thể cài đặt
+fi
 
 # 3. Cài đặt thư viện Python cho bot Telegram
 echo "3. Cài đặt thư viện Python Telegram Bot..."
@@ -71,7 +88,6 @@ if [ $? -ne 0 ]; then
 fi
 
 # Tìm tên thư mục đã giải nén (thường là "3proxy-VERSION" hoặc chỉ "3proxy")
-# Sử dụng ls -d 3proxy* để tìm thư mục bắt đầu bằng "3proxy"
 EXTRACTED_DIR=$(ls -d 3proxy* 2>/dev/null | head -1)
 if [ -z "$EXTRACTED_DIR" ] || [ ! -d "$EXTRACTED_DIR" ]; then
     echo "Lỗi: Không thể xác định thư mục giải nén của 3proxy."
