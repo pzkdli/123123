@@ -274,3 +274,35 @@ def handle_dashboard(message):
     dashboard_text = (
         f"📊 **Tình trạng Proxy hiện tại:**\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
+        f"🔢 **Tổng proxy:** `{total}`\n"
+        f"🟢 **Proxy chưa sử dụng:** `{unused}`\n"
+        f"🟡 **Proxy đã sử dụng:** `{active}`\n"
+        f"❌ **Proxy đã hết hạn:** `{expired}`\n"
+        f"🧱 **Đang hoạt động:** ✅\n"
+        f"⏰ **Lần kiểm tra cuối:** `{last_check_time}`"
+    )
+    bot.send_message(message.chat.id, dashboard_text, parse_mode="Markdown")
+    
+@bot.message_handler(commands=['ds_proxy'])
+def handle_get_proxy_list(message):
+    if not is_admin(message): return
+    bot.send_message(message.chat.id, "Đang chuẩn bị danh sách proxy...")
+    data = load_proxy_data()
+    active_proxies = [p for p in data['proxies'] if p['status'] != 'expired']
+    send_proxy_list_to_admin(message.chat.id, active_proxies, "proxy_list.txt")
+
+@bot.message_handler(commands=['check'])
+def handle_manual_check(message):
+    if not is_admin(message): return
+    bot.send_message(message.chat.id, "⚙️ Bắt đầu kiểm tra và tái tạo thủ công...")
+    check_proxies_and_regenerate()
+    bot.send_message(message.chat.id, "✅ Kiểm tra hoàn tất.")
+
+# --- MAIN EXECUTION ---
+if __name__ == '__main__':
+    print("Starting Proxy Manager Bot...")
+    # Khởi tạo file data nếu chưa có
+    if not os.path.exists(PROXY_DATA_FILE):
+        save_proxy_data({"proxies": [], "used_ports": []})
+        
+    bot.polling(none_stop=True)
