@@ -3,6 +3,7 @@
 # --- Cảnh báo bảo mật ---
 # Mở tất cả các cổng (10000-60000) và tắt SELinux có thể làm giảm đáng kể bảo mật của VPS của bạn.
 # Hãy đảm bảo bạn hiểu rủi ro trước khi chạy tập lệnh này trên môi trường sản xuất.
+# Chạy dịch vụ 3proxy dưới quyền root chỉ là tạm thời để khắc phục lỗi.
 # --- End cảnh báo ---
 
 echo "--- Bắt đầu quá trình cài đặt và cấu hình ---"
@@ -115,8 +116,8 @@ Type=forking
 ExecStart=${THREEPROXY_DIR}/3proxy /etc/3proxy/3proxy.cfg
 ExecReload=/bin/kill -HUP \$MAINPID
 PIDFile=/var/run/3proxy.pid
-User=nobody # Chạy 3proxy với quyền user thấp hơn
-Group=nobody
+User=root # Tạm thời chạy 3proxy với quyền root để kiểm tra
+Group=root # Tạm thời chạy 3proxy với quyền root để kiểm tra
 LimitNOFILE=512000
 
 [Install]
